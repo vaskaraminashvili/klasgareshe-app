@@ -28,7 +28,7 @@
 | **Who plays** | Kids in grades 1-4 at launch. Data model supports grades 1-12 so more grades can be added later by adding content only. |
 | **Who owns the account** | A **parent** (email login). One parent has several **child profiles**. |
 | **Core loop** | Pick a subject, follow the grade path (units, lessons), each lesson is 6-10 short mini-games, earn stars and XP, keep the streak, unlock badges and avatars. |
-| **Two kinds of content** | (1) **Grade path:** the main curriculum per subject and grade. (2) **Themes:** optional topic courses inside a subject (e.g. Math: "საათი და დრო"). |
+| **Two independent tracks** | (1) **School path** (სკოლის გეგმა): per subject and grade, follows what the child learns at school, with periodic mid-term reviews. (2) **Topics** (თემები): standalone practice courses such as "გამრავლება" or "გაყოფა", each going from easy to hard, usable by any child whose grade fits. See 4.2. |
 | **Language** | Georgian only at launch. |
 | **Business** | Free in release 1. A paid plan comes later (section 11). |
 
@@ -125,19 +125,30 @@ children                  -- kid profiles
 ```
 grades      id, number (1..12), name ('I კლასი'), is_active   -- seed 1-4 active, 5-12 inactive
 subjects    id, slug, name, icon, color_token, sort, is_active
-courses     id, subject_id, kind enum('path','theme'), title, description, icon, cover_media,
+courses     id, subject_id, kind enum('path','topic'), title, description, icon, cover_media,
             grade_min, grade_max, is_premium bool default false, sort, is_published
-units       id, course_id, title, description, sort, icon
+units       id, course_id, title, description, sort, icon,
+            level tinyint nullable   -- topics only: 1 easy, 2 medium, 3 hard (a unit = a difficulty level)
 lessons     id, unit_id, title, sort, est_minutes, xp_reward default 10,
-            is_checkpoint bool, settings json (shuffle, pass_ratio default 0.7)
+            kind enum('normal','checkpoint','midterm') default 'normal',
+            settings json (shuffle, pass_ratio default 0.7, midterm: question_count default 15)
 exercises   id, lesson_id, type (string key), prompt, prompt_audio (media), image (media),
             payload json (type-specific, validated by the type class),
             explanation nullable, difficulty tinyint 1..3, sort, is_active
 ```
-- **Grade path** = `courses.kind = 'path'`, one per (subject, grade), e.g. "მათემატიკა: II კლასი".
-- **Theme** = `courses.kind = 'theme'` with a grade range.
-- A child sees the paths of **their grade** (plus earlier grades for review) and the themes whose range includes their grade.
+**School path** (`kind = 'path'`): one per (subject, grade), e.g. "მათემატიკა: IV კლასი". Its units mirror the school year in order (for grade 4 math: natural numbers, multiplication, division, fractions, ...). It is the "do what school does" track.
+
+**Topic** (`kind = 'topic'`): a standalone course inside a subject, e.g. Math → "გამრავლება" or "გაყოფა". It has **its own content, progress and unlocking, independent of the school path**. Its units are difficulty levels (`level` 1 easy → 3 hard), each with a few lessons. `grade_min`/`grade_max` say which grades it suits (e.g. multiplication: grades 2-6); it does not depend on the child's school progress, so a grade-4 child can start any suitable topic at any time.
+
+- A child sees the school path of **their grade** (earlier grades stay available for review) and the topics whose grade range includes their grade.
+- The two tracks share the same tables, exercise types, lesson player, stars and XP; only the course `kind` and how the UI presents it differ. Topic exercises are authored separately from path exercises (no sharing in release 1; keep it simple).
+- Optional hint for later: a path unit may name a related topic (nullable `units.topic_course_id`), so the parent report can say "needs practice: გამრავლება". Not required in release 1.
 - Adding grade 5+ later = activate the grade rows and add courses. No code change.
+
+**Mid-term review** (`lessons.kind = 'midterm'`): a lesson placed inside a school path (e.g. after every 3-4 units and at the end of the year) that **summarizes everything learned in that course so far**.
+- It has **no authored exercises of its own.** When started, the server builds the queue by randomly picking `question_count` (default 15) active exercises from the lessons the child has already completed earlier in the same course, spread across units and weighted toward ones answered wrongly before.
+- Passing (`pass_ratio`) unlocks the following units. `checkpoint` lessons work the same way but only cover the unit they close.
+- Topics have no mid-term; each difficulty level ends with a normal lesson, and the next level unlocks after the previous level's last lesson is passed.
 
 ### 4.3 Progress
 ```
@@ -149,7 +160,9 @@ xp_events          id, child_id, amount, source enum(lesson, streak_bonus, missi
 daily_activity     child_id, date, xp, lessons, seconds
 ```
 - **Stars:** finished = 1★, ≥ 80% first-try correct = 2★, 100% = 3★. Replays improve `best_stars`; replay XP is 50%.
-- **Unlock:** a lesson unlocks when the previous one has ≥ 1★. The next unit unlocks when the checkpoint lesson is passed. A parent setting "unlock all" overrides this.
+- **Unlock (inside any course):** a lesson unlocks when the previous one has ≥ 1★. The next unit (or topic level) unlocks when the last lesson, checkpoint or mid-term of the current one is passed. A parent setting "unlock all" overrides this.
+- **Independence:** school-path progress never locks or unlocks topics, and topic progress never affects the school path. Level 1 of every topic is open from the start.
+- Stars, XP, streak and achievements count for both tracks.
 
 ### 4.4 Gamification
 ```
@@ -263,7 +276,8 @@ Content will be authored by admins later. For now the seeders create **realistic
 - **Demo course "ყველა თამაში"** (all games): one unit, one lesson per exercise type, **at least 3 exercises per type** (11 types). This is the main way to test and demo every game.
 - **Grade 1:** `georgian`, `math`, `nature` path courses with 2 units × 3 lessons × 6-8 exercises, using every type at least once.
 - **Grades 2, 3, 4:** one path course per grade for `georgian` and `math`, each 1 unit × 3 lessons × 6 exercises, plus `nature` for grade 2 and `society` for grades 3-4 with 1 unit × 2 lessons.
-- **Themes:** 2 (e.g. "საათი და დრო", grades 2-4; "საქართველოს ცხოველები", grades 1-4).
+- **Topics** (3 levels each, 2 lessons per level): math "შეკრება და გამოკლება" (grades 1-3), "გამრავლება" (grades 2-5), "გაყოფა" (grades 3-5); georgian "ანტონიმები"; nature "საქართველოს ცხოველები".
+- **Mid-term:** the grade-4 math and georgian path courses each contain one `midterm` lesson after their first 2 units, so the feature can be demoed.
 - **Dev data:** one parent user (known dev password), one admin user, two children (grade 1, grade 3), 24 free avatars, about 20 achievements, one league.
 
 Example topics: ანბანი და პირველი სიტყვები, მარცვლები, რიცხვები 1-20, შეკრება/გამოკლება, გამრავლების ტაბულა, ცხოველები და სახლები, სხეულის ნაწილები, ანდაზები, გამოცანები, ანტონიმები, საათი, ლარი და თეთრი, წილადები (grade 4).
@@ -298,7 +312,7 @@ Sounds: `correct`, `wrong`, `complete`, `tap`; respect the child's sound setting
 - **Achievements:** rule types `lessons_completed` (optional subject), `perfect_lessons`, `streak_days`, `unit_completed`, `course_completed`, `xp_total`, `exercise_type_correct`, `league_finish`. Some unlock avatars or frames, so cosmetics have a purpose without a second currency.
 - **Usernames and safety:** generated from a Georgian adjective + animal + number; the kid can tap 🔄 for another; no free typing. Public data on the league = username, avatar, weekly XP only. Collect minimum personal data; parent consent at signup (checkbox + privacy policy link).
 - **League:** groups of up to 20 kids of similar grade (bands 1-2, 3-4). A scheduled `RolloverLeagues` command runs Monday 00:00 Tbilisi: top 3 promote, bottom 3 demote. Off by default for grades 1-2; the parent can toggle it.
-- **Daily mission:** 3 simple tasks (finish 1 lesson, answer 10 correctly, play 1 theme lesson). Completing all gives bonus XP and a random avatar item. A small card on home, not a busy page.
+- **Daily mission:** 3 simple tasks (finish 1 lesson, answer 10 correctly, play 1 topic lesson). Completing all gives bonus XP and a random avatar item. A small card on home, not a busy page.
 
 ---
 
@@ -340,7 +354,7 @@ Route prefix `/parent`, middleware `auth` + `verified` + parent-PIN (re-asked af
 
 **Complete kid screen list**
 1. Who's playing? (avatars, parent lock icon in a corner)
-2. Home / path (top bar: subject picker, 🔥, ⭐; then the lesson path; a "themes" row at the end; current node big and pulsing)
+2. Home / school path (top bar: subject picker, 🔥, ⭐; then the school path of the child's grade for that subject; mid-term nodes look different, e.g. a trophy; one clear "თემები" button/row to open the topics of this subject; current node big and pulsing)
 3. Subject picker (sheet, max 5 tiles)
 4. Start lesson (sheet: title, 3 stars, "დაწყება")
 5. Locked lesson (sheet: 🔒 + one sentence)
@@ -348,7 +362,7 @@ Route prefix `/parent`, middleware `auth` + `verified` + parent-PIN (re-asked af
 7. Answer feedback (sheet inside the lesson)
 8. Lesson result
 9. New badge (modal)
-10. Themes grid
+10. Topics grid (topics of the chosen subject for the child's grade: icon + title + stars; tapping opens that topic as a path with 3 level groups, easy → hard, same layout as screen 2)
 11. Rewards (tabs: ბეჯები grid, ლიგა list)
 12. Me (avatar with level ring, username, up to 3 tiles)
 13. Avatar picker
@@ -372,7 +386,7 @@ Navigation rules: max 2 taps from Home to starting a lesson; every sheet closes 
 - Create the billing tables of 4.5 and a `PlanSeeder` with `free` and `premium` rows (prices empty or 0).
 - Keep `courses.is_premium` and `children` limits (max children per parent) as data.
 - Add **one central place for feature checks**, e.g. a `Gate::define('premium', ...)` or small `Entitlements` service that answers "can this parent use X?". **In release 1 it always returns true.** All premium-related UI and code must go through it, never through scattered `if` checks.
-- Planned split (not enforced yet): **Free** = grade path for all subjects, 1 child, limited themes. **Premium** = all themes, up to 4 children, full reports and weekly email, offline packs, extra avatars.
+- Planned split (not enforced yet): **Free** = school path for all subjects, 1 child, limited topics. **Premium** = all topics, up to 4 children, full reports and weekly email, offline packs, extra avatars.
 - Any lock card is shown to the **parent only**, never as a sales pitch to a child.
 - **Do not build:** payment gateway, checkout, webhooks, invoices, or any provider SDK. A `PaymentGateway` interface may be added later (Georgian providers such as BOG/TBC, or Stripe; prices in GEL).
 
@@ -398,7 +412,7 @@ Navigation rules: max 2 taps from Home to starting a lesson; every sheet closes 
 
 **Phase 3: Lesson player + first 6 types.** `LessonPlayer`, shell, feedback sheet, sounds, re-queue, result screen, attempts saved. Types: `choice`, `match_pairs`, `build_word`, `fill_gap`, `number_input`, `true_false`.
 
-**Phase 4: Path and progress.** Home path, subject picker, themes, lock/unlock, stars, resume, start/locked sheets.
+**Phase 4: Paths, topics and progress.** Home school path, subject picker, topics grid and topic level paths, lock/unlock (independent per course), stars, resume, start/locked sheets, `midterm` and `checkpoint` lesson building (random picks from completed lessons of the same course).
 
 **Phase 5: Remaining types.** `riddle`, `categorize`, `order`, `hotspot`, `word_search`.
 
@@ -419,6 +433,9 @@ Estimated time: about **12-14 weeks** for one developer with AI help (content wr
 - [ ] Streak tests across midnight in Asia/Tbilisi and with freezes.
 - [ ] League rollover test (promote/stay/demote, grade bands).
 - [ ] `migrate:fresh --seed` produces a playable app with all 11 game types.
+- [ ] Topic progress and school-path progress are independent (tests: finishing a topic level unlocks nothing in the path and vice versa).
+- [ ] A mid-term only draws exercises from lessons already completed in its own course, and never repeats an exercise in one attempt.
+- [ ] A grade-4 child can start "გამრავლება" level 1 without having done anything in the school path.
 - [ ] Adding a grade-5 course in the admin makes it appear for a grade-5 child with no code change.
 - [ ] No hard-coded Georgian strings in Blade (all in `lang/`).
 - [ ] No `uppercase` class on Georgian text.
